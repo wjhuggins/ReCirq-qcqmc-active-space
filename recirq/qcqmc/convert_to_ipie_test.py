@@ -120,6 +120,18 @@ def test_get_occa_occb_coeff():
     assert np.allclose(sector_from_coeff.coeff, sector.coeff)
 
 
+def test_get_occa_occb_coeff_padded_shape():
+    """Test that the occa and occb coefficients are extracted correctly."""
+    n_orb = 4
+    n_elec = 4
+    fqe_wf = fqe_wfn.Wavefunction([[n_elec, 0, n_orb]])
+    fqe_wf.set_wfn(strategy="hartree-fock")
+    occ_coef = convert_to_ipie.get_occa_occb_coeff(fqe_wf, pad_zeros=10)
+    assert occ_coef.occa.shape == (1, n_elec // 2 + 10)
+    assert occ_coef.occb.shape == (1, n_elec // 2 + 10)
+    assert occ_coef.coeffs.shape == (1,)
+
+
 def test_save_wavefunction_for_ipie(
     fixture_4_qubit_ham_and_trial_wf,
 ):

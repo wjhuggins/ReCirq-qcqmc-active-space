@@ -196,13 +196,14 @@ class OccCoef:
 
 
 def get_occa_occb_coeff(
-    fqe_wf: fqe_wfn.Wavefunction, threshold: float = 1e-5
+    fqe_wf: fqe_wfn.Wavefunction, threshold: float = 1e-5, pad_zeros: int=0
 ) -> OccCoef:
     """A helper function to organize data for an AFQMC code to ingest.
 
     Args:
         fqe_wf: The FQE wavefunction.
         threshold: An optional threshold below which to set coefficients to zero.
+        pad_zeros: The number of zeros to add on (for virtual orbitals).
 
     Returns:
         The AFQMC wavefunction
@@ -229,9 +230,20 @@ def get_occa_occb_coeff(
         sector = fqe_wf.sector(sector_key)
         _get_sector_data(sector, threshold, occa_list, occb_list, coeffs)
 
+    occa_array = np.asarray(occa_list)
+    occb_array = np.asarray(occb_list)
+
+    expanded_shape = (occa_array.shape[0], occa_array.shape[1] + pad_zeros)
+
+    expanded_occa_array = np.zeros(shape=expanded_shape, dtype=occa_array.dtype)
+    expanded_occa_array[:,0:occa_array.shape[1]] = occa_array
+
+    expanded_occb_array = np.zeros(shape=expanded_shape, dtype=occb_array.dtype)
+    expanded_occb_array[:,0:occb_array.shape[1]] = occb_array
+
     return OccCoef(
-        occa=np.asarray(occa_list),
-        occb=np.asarray(occb_list),
+        occa=expanded_occa_array,
+        occb=expanded_occb_array,
         coeffs=np.asarray(coeffs),
     )
 
@@ -330,8 +342,13 @@ def save_wavefunction_for_ipie(
     else:
         xd = _get_trial_wf_export_data(trial_wf_data)
 
-    occ_unrot = get_occa_occb_coeff(xd.unrotated_fqe_wf, threshold)
-    occ_rot = get_occa_occb_coeff(xd.rotated_fqe_wf, threshold)
+    if type(hamiltonian_data.params) == hamiltonian.PyscfActiveSpaceHamiltonianParams:
+        pad_zeros = hamiltonian_data.params.n_frozen_virt
+    else:
+        pad_zeros=0
+
+    occ_unrot = get_occa_occb_coeff(xd.unrotated_fqe_wf, threshold, pad_zeros=pad_zeros)
+    occ_rot = get_occa_occb_coeff(xd.rotated_fqe_wf, threshold, pad_zeros=pad_zeros)
     fci_energy = trial_wf_data.fci_energy
     ansatz_energy = trial_wf_data.ansatz_energy
 
