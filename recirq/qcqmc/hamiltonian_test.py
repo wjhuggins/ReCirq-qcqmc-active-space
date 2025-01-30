@@ -24,6 +24,7 @@ from recirq.qcqmc.hamiltonian import (
     HamiltonianData,
     HamiltonianFileParams,
     PyscfHamiltonianParams,
+    PyscfActiveSpaceHamiltonianParams,
 )
 
 
@@ -144,7 +145,7 @@ def test_pyscf_saves_chk_without_overwrite(tmp_path):
     assert chk_path.exists()
 
     with pytest.raises(FileExistsError):
-        pyscf_hamiltonian = HamiltonianData.build_hamiltonian_from_pyscf(pyscf_params)
+        pyscf_hamiltonian = HamiltonianData.build_hamiltonian_from_pyscf_active_space(pyscf_params)
 
     chk_path.unlink()
 
@@ -174,5 +175,39 @@ def test_pyscf_saves_chk_with_overwrite(tmp_path):
     HamiltonianData.build_hamiltonian_from_pyscf(pyscf_params)
 
     assert chk_path.exists()
+
+    chk_path.unlink()
+
+def test_pyscf_active_space_runs(tmp_path):
+    pyscf_params = PyscfActiveSpaceHamiltonianParams(
+        name="N2 test",
+        n_orb=28,
+        n_elec=14,
+        n_cas=6,
+        n_elec_cas=6,
+        geometry=(
+            ("N", (0, 0, 0)),
+            ("N", (0, 0, 1.3)),
+        ),
+        basis="ccpvdz",
+        multiplicity=1,
+        charge=0,
+        save_chkfile=True,
+        path_prefix=str(tmp_path),
+    )
+
+    chk_path = pyscf_params.base_path.with_suffix(".chk")
+    chk_path.unlink(missing_ok=True)
+
+    ham_data = HamiltonianData.build_hamiltonian_from_pyscf_active_space(pyscf_params)
+    assert chk_path.exists()
+
+    np.testing.assert_almost_equal(ham_data.e_fci, -108.963954593392)
+
+    assert ham_data.one_body_integrals.shape == (6,6)
+    assert ham_data.two_body_integrals_pqrs.shape == (6,6,6,6)
+
+    with pytest.raises(FileExistsError):
+        pyscf_hamiltonian = HamiltonianData.build_hamiltonian_from_pyscf_active_space(pyscf_params)
 
     chk_path.unlink()

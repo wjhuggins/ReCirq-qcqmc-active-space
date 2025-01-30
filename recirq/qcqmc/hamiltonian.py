@@ -23,7 +23,7 @@ import numpy as np
 import openfermion as of
 from fqe.hamiltonians.restricted_hamiltonian import RestrictedHamiltonian
 from fqe.openfermion_utils import integrals_to_fqe_restricted
-from pyscf import ao2mo, fci, gto, scf
+from pyscf import ao2mo, fci, gto, scf, mcscf
 
 from recirq.qcqmc import config, data
 
@@ -175,6 +175,101 @@ class PyscfHamiltonianParams(data.Params):
         assert molecule.nelectron == self.n_elec
 
         return molecule
+    
+
+@attrs.frozen
+class PyscfActiveSpaceHamiltonianParams(data.Params):
+    """Class for describing the parameters to get a Hamiltonian from Pyscf.
+
+    Args:
+        name: A name for the Hamiltonian
+        n_orb: The number of orbitals (redundant with later parameters but used
+            for validation).
+        n_elec: The number of electrons (redundant with later parameters but used
+            for validation).
+        n_cas: The number of orbitals in the active space.
+        n_elec_cas: The number of electrons in the active space.
+        geometry: The coordinates of each atom. An example is [('H', (0, 0, 0)),
+            ('H', (0, 0, 0.7414))]. Distances are in angstrom. Use atomic
+            symbols to specify atoms.
+        basis: The basis set, e.g., 'cc-pvtz'.
+        multiplicity: The spin multiplicity
+        charge: The total molecular charge.
+        rhf: Whether to use RHF (True) or ROHF (False).
+        verbose_scf: Setting passed to pyscf's scf verbose attribute.
+        save_chkfile: If True, then pyscf will save a chk file for this Hamiltonian.
+        overwrite_chk_file: If save_chkfile and overwrite_chk_file are both true then Pyscf
+            will be allowed to overwrite the previously saved chk file. Otherwise, if save_chkfile
+            is True and overwrite_chk_file is False, then we raise a FileExistsError if the
+            chk file already exists.
+    """
+
+    name: str
+    n_orb: int
+    n_elec: int
+    n_cas: int
+    n_elec_cas: int
+    geometry: Tuple[GeomT, ...] = attrs.field(
+        converter=lambda x: tuple((at[0], tuple(at[1])) for at in x)
+    )
+    basis: str
+    multiplicity: int
+    charge: int = 0
+    rhf: bool = True
+    verbose_scf: int = 0
+    save_chkfile: bool = False
+    overwrite_chk_file: bool = False
+    path_prefix: str = "."
+
+    def _json_dict_(self):
+        return attrs.asdict(self)
+
+    @property
+    def path_string(self) -> str:
+        """Output path string"""
+        return self.path_prefix + config.OUTDIRS.DEFAULT_HAMILTONIAN_DIRECTORY + self.name
+
+    @property
+    def chk_path(self) -> Path:
+        """Path string to any checkpoint file is saved."""
+        parent = self.base_path.parent
+        if not parent.is_dir():
+            parent.mkdir(exist_ok=True, parents=True)
+        return self.base_path.with_suffix(".chk")
+    
+    @property
+    def n_frozen_core(self) -> int:
+        """The number of frozen core orbitals."""
+        n_frozen_elec = self.n_elec - self.n_elec_cas
+        assert n_frozen_elec >= 0
+        assert n_frozen_elec % 2 == 0
+        
+        return n_frozen_elec // 2
+
+    @property
+    def n_frozen_virt(self) -> int:
+        """The number of frozen virtual orbitals."""
+        return self.n_orb - self.n_cas - self.n_frozen_core
+
+
+    @property
+    def pyscf_molecule(self) -> gto.Mole:
+        """Underlying pyscf.gto.Mole. instance."""
+        molecule = gto.Mole()
+
+        molecule.atom = self.geometry
+        molecule.basis = self.basis
+        molecule.spin = self.multiplicity - 1
+        molecule.charge = self.charge
+        molecule.symmetry = False
+
+        molecule.build()
+
+        assert int(molecule.nao_nr()) == self.n_orb
+        assert molecule.nelectron == self.n_elec
+        assert self.n_elec_cas % 2 == 0
+
+        return molecule
 
 
 @attrs.frozen
@@ -313,6 +408,62 @@ class HamiltonianData(data.Data):
         pyscf_fci = fci.FCI(molecule, pyscf_scf.mo_coeff)
         pyscf_fci.verbose = 0
         e_fci = pyscf_fci.kernel()[0]
+
+        return cls(
+            params=params,
+            e_core=e_core,
+            one_body_integrals=one_body_integrals,
+            two_body_integrals_pqrs=two_body_integrals,
+            e_hf=e_hf,
+            e_fci=e_fci,
+        )
+    
+
+    @classmethod
+    def build_hamiltonian_from_pyscf_active_space(
+        cls, params: PyscfActiveSpaceHamiltonianParams
+    ) -> 'HamiltonianData':
+        """Construct a HamiltonianData object from pyscf molecule.
+
+        Runs a RHF or ROHF simulation, performs an integral transformation and computes the FCI energy.
+
+        Args:
+            params: A PyscfHamiltonianActiveSpaceParams object specifying the molecule. pyscf_molecule is required.
+
+        Returns:
+            A HamiltonianData object.
+        """
+        molecule = params.pyscf_molecule
+
+        if params.rhf:
+            pyscf_scf = scf.RHF(molecule)
+        else:
+            pyscf_scf = scf.ROHF(molecule)
+
+        pyscf_scf.verbose = params.verbose_scf
+        if params.save_chkfile:
+            if not params.overwrite_chk_file:
+                if params.chk_path.exists():
+                    raise FileExistsError(
+                        f"A chk file already exists at {params.chk_path}"
+                    )
+            pyscf_scf.chkfile = str(params.chk_path.resolve())
+        pyscf_scf = pyscf_scf.newton()
+        pyscf_scf.run()
+
+        e_hf = float(pyscf_scf.e_tot)
+
+        mc = mcscf.CASCI(pyscf_scf, ncas=params.n_cas, ncore=params.n_frozen_core, nelecas=(params.n_elec_cas//2, params.n_elec_cas//2))
+
+        one_body_integrals, e_core = mc.get_h1eff()
+
+        two_body_integrals = ao2mo.restore(
+                1, mc.get_h2eff(), params.n_cas)  # no permutational symmetr
+
+
+        e_core = mc.h1e_for_cas()[1]
+
+        e_fci = mc.kernel()[0]
 
         return cls(
             params=params,
